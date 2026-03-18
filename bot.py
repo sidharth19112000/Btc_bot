@@ -18,36 +18,58 @@ CHAT_ID = os.getenv("6094849602")
 # =========================
 app = Flask(__name__)
 
-@app.route("/")
+# Health check (Render needs this)
+@app.route("/", methods=["GET"])
 def home():
     return "Bot Running"
 
 # =========================
-# TELEGRAM SEND
+# TELEGRAM SEND FUNCTION
 # =========================
 def send_message(text):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    requests.post(url, data={
-        "chat_id": CHAT_ID,
-        "text": text
-    })
+    try:
+        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+        requests.post(url, data={
+            "chat_id": CHAT_ID,
+            "text": text
+        }, timeout=10)
+    except Exception as e:
+        print("Telegram Error:", e)
 
 # =========================
-# GET BTC DATA (COINGECKO)
+# GET BTC DATA (COINGECKO SAFE)
 # =========================
 def get_data():
-    url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
-    params = {"vs_currency": "usd", "days": 1, "interval": "hourly"}
+    try:
+        url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
+        params = {
+            "vs_currency": "usd",
+            "days": 1,
+            "interval": "hourly"
+        }
 
-    response = requests.get(url, params=params)
-    data = response.json()
+        response = requests.get(url, params=params, timeout=10)
 
-    prices = data["prices"]
+        if response.status_code != 200:
+            print("CoinGecko Error:", response.status_code)
+            return None
 
-    df = pd.DataFrame(prices, columns=["time", "price"])
-    df["close"] = df["price"]
+        data = response.json()
 
-    return df
+        if "prices" not in data:
+            print("No prices in response")
+            return None
+
+        prices = data["prices"]
+
+        df = pd.DataFrame(prices, columns=["time", "price"])
+        df["close"] = df["price"]
+
+        return df
+
+    except Exception as e:
+        print("Data Error:", e)
+        return None
 
 # =========================
 # PREPARE DATA
@@ -68,9 +90,14 @@ def prepare_data(df):
 # =========================
 def generate_signal():
     df = get_data()
+
+    if df is None or len(df) < 20:
+        print("Not enough data")
+        return
+
     df = prepare_data(df)
 
-    if len(df) < 20:
+    if len(df) < 10:
         return
 
     model = RandomForestClassifier(n_estimators=100)
@@ -89,7 +116,7 @@ def generate_signal():
     confidence = np.max(model.predict_proba(input_data)) * 100
     price = latest["close"]
 
-    # 🔥 Strong filter
+    # 🔥 Strong Signal Filter
     if confidence < 75:
         return
 
@@ -116,19 +143,24 @@ def generate_signal():
     send_message(message)
 
 # =========================
-# WEBHOOK
+# WEBHOOK ROUTE
 # =========================
 @app.route("/webhook", methods=["POST"])
 def telegram_webhook():
-    data = request.get_json()
+    try:
+        data = request.get_json()
 
-    if data and "message" in data:
-        text = data["message"].get("text", "")
+        if data and "message" in data:
+            text = data["message"].get("text", "")
 
-        if text == "1":
-            generate_signal()
+            if text == "1":
+                generate_signal()
 
-    return "ok"
+        return "ok"
+
+    except Exception as e:
+        print("Webhook Error:", e)
+        return "ok"
 
 # =========================
 # START SERVER
