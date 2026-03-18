@@ -11,7 +11,7 @@ from sklearn.ensemble import RandomForestClassifier
 # =========================
 # ENV VARIABLES
 # =========================
-TOKEN = os.getenv("8791048311:AAFLQRG0W7F- 6SNNcUmaBRwKMHfz190osa8")
+TOKEN = os.getenv("8791048311:AAFLQRG0W7F-6SNNcUmaBRwKMHfz190osa8")
 CHAT_ID = os.getenv("6094849602")
 
 # =========================
