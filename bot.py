@@ -1,6 +1,5 @@
 import os
 import requests
-import ccxt
 import pandas as pd
 import numpy as np
 import ta
@@ -15,22 +14,16 @@ TOKEN = os.getenv("8791048311:AAFLQRG0W7F-6SNNcUmaBRwKMHfz19Oosa8")
 CHAT_ID = os.getenv("6094849602")
 
 # =========================
-# EXCHANGE
-# =========================
-exchange = ccxt.bybit()
-
-# =========================
 # FLASK APP
 # =========================
 app = Flask(__name__)
 
-# Health check route (Render needs this)
-@app.route("/", methods=["GET"])
+@app.route("/")
 def home():
     return "Bot Running"
 
 # =========================
-# TELEGRAM SEND FUNCTION
+# TELEGRAM SEND
 # =========================
 def send_message(text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
@@ -40,25 +33,34 @@ def send_message(text):
     })
 
 # =========================
-# GET MARKET DATA
+# GET BTC DATA (COINGECKO)
 # =========================
 def get_data():
-    ohlcv = exchange.fetch_ohlcv("BTC/USDT", "15m", limit=200)
-    df = pd.DataFrame(ohlcv, columns=['time','open','high','low','close','volume'])
+    url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
+    params = {"vs_currency": "usd", "days": 1, "interval": "hourly"}
+
+    response = requests.get(url, params=params)
+    data = response.json()
+
+    prices = data["prices"]
+
+    df = pd.DataFrame(prices, columns=["time", "price"])
+    df["close"] = df["price"]
+
     return df
 
 # =========================
 # PREPARE DATA
 # =========================
 def prepare_data(df):
-    df['sma5'] = ta.trend.sma_indicator(df['close'], 5)
-    df['sma10'] = ta.trend.sma_indicator(df['close'], 10)
-    df['rsi'] = ta.momentum.rsi(df['close'], 14)
-    df['macd'] = ta.trend.macd_diff(df['close'])
+    df["sma5"] = ta.trend.sma_indicator(df["close"], 5)
+    df["sma10"] = ta.trend.sma_indicator(df["close"], 10)
+    df["rsi"] = ta.momentum.rsi(df["close"], 14)
 
     df = df.dropna()
 
-    df['target'] = np.where(df['close'].shift(-1) > df['close'], 1, 0)
+    df["target"] = np.where(df["close"].shift(-1) > df["close"], 1, 0)
+
     return df
 
 # =========================
@@ -68,11 +70,15 @@ def generate_signal():
     df = get_data()
     df = prepare_data(df)
 
+    if len(df) < 20:
+        return
+
     model = RandomForestClassifier(n_estimators=100)
 
-    features = ['sma5','sma10','rsi','macd']
+    features = ["sma5", "sma10", "rsi"]
+
     X = df[features]
-    y = df['target']
+    y = df["target"]
 
     model.fit(X, y)
 
@@ -81,9 +87,9 @@ def generate_signal():
 
     prediction = model.predict(input_data)[0]
     confidence = np.max(model.predict_proba(input_data)) * 100
-    price = latest['close']
+    price = latest["close"]
 
-    # Strong signal filter
+    # 🔥 Strong filter
     if confidence < 75:
         return
 
@@ -99,7 +105,7 @@ def generate_signal():
     message = f"""
 🚀 STRONG SIGNAL
 
-💰 Price: {price}
+💰 Price: {round(price,2)}
 📈 Signal: {signal}
 📊 Confidence: {round(confidence,2)}%
 
@@ -110,7 +116,7 @@ def generate_signal():
     send_message(message)
 
 # =========================
-# WEBHOOK ROUTE (STEP 1 FIX)
+# WEBHOOK
 # =========================
 @app.route("/webhook", methods=["POST"])
 def telegram_webhook():
