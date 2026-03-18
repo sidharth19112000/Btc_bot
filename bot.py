@@ -1,203 +1,130 @@
-import os
 import ccxt
 import pandas as pd
 import numpy as np
-import tensorflow as tf
 import requests
+import ta
+from sklearn.ensemble import RandomForestClassifier
+from flask import Flask
 import threading
 import time
-from flask import Flask, request
-from sklearn.preprocessing import MinMaxScaler
+import os
 
-# ==============================
-# TELEGRAM SETTINGS (Render ENV)
-# ==============================
+# ====== TELEGRAM SETTINGS ======
+TOKEN = os.getenv("8791048311:AAFLQRG0W7F-6SNNcUmaBRwKMHfz19Oosa8")
+CHAT_ID = os.getenv("6094849602")
 
-TOKEN = os.environ.get("8791048311:AAFLQRG0W7F-6SNNcUmaBRwKMHfz19Oosa8")
-CHAT_ID = os.environ.get("6094849602")
-
-SYMBOL = "BTC/USDT"
-TIMEFRAME = "15m"
-
-app = Flask(__name__)
-
+# ====== EXCHANGE ======
 exchange = ccxt.binance()
 
-# ==============================
-# CREATE OR LOAD LSTM MODEL
-# ==============================
+# ====== FLASK APP ======
+app = Flask(__name__)
 
-MODEL_PATH = "lstm_model.h5"
+@app.route("/")
+def home():
+    return "Bot Running"
 
-def create_model():
+# ====== TELEGRAM FUNCTION ======
+def send_message(text):
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    requests.post(url, data={"chat_id": CHAT_ID, "text": text})
 
-    model = tf.keras.Sequential([
-        tf.keras.layers.LSTM(64, input_shape=(50,1)),
-        tf.keras.layers.Dense(1)
-    ])
+# ====== GET DATA ======
+def get_data(timeframe="15m", limit=200):
+    ohlcv = exchange.fetch_ohlcv("BTC/USDT", timeframe, limit=limit)
+    df = pd.DataFrame(ohlcv, columns=['time','open','high','low','close','volume'])
+    return df
 
-    model.compile(optimizer="adam", loss="mse")
+# ====== FEATURE ENGINEERING ======
+def prepare_data(df):
+    df['sma5'] = ta.trend.sma_indicator(df['close'], window=5)
+    df['sma10'] = ta.trend.sma_indicator(df['close'], window=10)
+    df['sma30'] = ta.trend.sma_indicator(df['close'], window=30)
+    df['rsi'] = ta.momentum.rsi(df['close'], window=14)
+    df['macd'] = ta.trend.macd_diff(df['close'])
+    df['volume_ma'] = df['volume'].rolling(10).mean()
+
+    df = df.dropna()
+
+    df['target'] = np.where(df['close'].shift(-1) > df['close'], 1, 0)
+
+    return df
+
+# ====== TRAIN MODEL ======
+def train_model(df):
+    features = ['sma5','sma10','sma30','rsi','macd','volume']
+    X = df[features]
+    y = df['target']
+
+    model = RandomForestClassifier(n_estimators=100)
+    model.fit(X, y)
+
     return model
 
-if os.path.exists(MODEL_PATH):
-    model = tf.keras.models.load_model(MODEL_PATH)
-else:
-    model = create_model()
+# ====== SIGNAL GENERATOR ======
+def generate_signal():
+    df = get_data()
+    df = prepare_data(df)
 
-# ==============================
-# SEND TELEGRAM MESSAGE
-# ==============================
+    model = train_model(df)
 
-def send_message(text):
+    latest = df.iloc[-1]
+    features = latest[['sma5','sma10','sma30','rsi','macd','volume']].values.reshape(1,-1)
 
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    prediction = model.predict(features)[0]
+    confidence = np.max(model.predict_proba(features)) * 100
 
-    requests.post(url, data={
-        "chat_id": CHAT_ID,
-        "text": text
-    })
+    price = latest['close']
 
-# ==============================
-# TRAIN LSTM AUTOMATICALLY
-# ==============================
-
-def train_model():
-
-    data = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=1000)
-    df = pd.DataFrame(data, columns=["t","o","h","l","c","v"])
-
-    prices = df["c"].values.reshape(-1,1)
-
-    scaler = MinMaxScaler()
-    scaled = scaler.fit_transform(prices)
-
-    X, y = [], []
-
-    for i in range(50, len(scaled)):
-        X.append(scaled[i-50:i])
-        y.append(scaled[i])
-
-    X, y = np.array(X), np.array(y)
-
-    model.fit(X, y, epochs=5, verbose=0)
-
-    model.save(MODEL_PATH)
-
-# ==============================
-# LSTM SIGNAL
-# ==============================
-
-def lstm_signal():
-
-    data = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=100)
-    df = pd.DataFrame(data, columns=["t","o","h","l","c","v"])
-
-    prices = df["c"].values.reshape(-1,1)
-
-    scaler = MinMaxScaler()
-    scaled = scaler.fit_transform(prices)
-
-    X = np.array(scaled[-50:]).reshape(1,50,1)
-
-    prediction = model.predict(X, verbose=0)[0][0]
-    current = scaled[-1][0]
-
-    confidence = abs(prediction - current) * 100
-
-    if prediction > current:
-        return "BUY", confidence
+    if prediction == 1 and confidence > 60:
+        signal = "BUY"
+        stop_loss = price * 0.99
+        target = price * 1.02
+    elif prediction == 0 and confidence > 60:
+        signal = "SELL"
+        stop_loss = price * 1.01
+        target = price * 0.98
     else:
-        return "SELL", confidence
+        signal = "WAIT"
+        stop_loss = "-"
+        target = "-"
 
-# ==============================
-# RISK PERCENTAGE
-# ==============================
+    message = f"""
+📊 BTC/USDT SIGNAL
 
-def calculate_risk(df):
+💰 Price: {price}
 
-    df["atr"] = df["c"].rolling(14).std()
+📈 Signal: {signal}
+📊 Confidence: {round(confidence,2)}%
 
-    volatility = df["atr"].iloc[-1] / df["c"].iloc[-1]
+🛑 Stop Loss: {stop_loss}
+🎯 Target: {target}
+"""
 
-    if volatility < 0.005:
-        return 80
-    elif volatility < 0.01:
-        return 60
-    else:
-        return 40
+    send_message(message)
 
-# ==============================
-# AUTO SIGNAL LOOP
-# ==============================
-
-def auto_loop():
-
+# ====== AUTO LOOP ======
+def auto_trade():
     while True:
-
         try:
+            generate_signal()
+            time.sleep(900)  # 15 minutes
+        except:
+            time.sleep(60)
 
-            signal, confidence = lstm_signal()
-            price = exchange.fetch_ticker(SYMBOL)["last"]
+# ====== TELEGRAM WEBHOOK ======
+@app.route(f"/{TOKEN}", methods=["POST"])
+def telegram_webhook():
+    data = requests.get(f"https://api.telegram.org/bot{TOKEN}/getUpdates").json()
 
-            data = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=50)
-            df = pd.DataFrame(data, columns=["t","o","h","l","c","v"])
+    if data["result"]:
+        message = data["result"][-1]["message"]["text"]
 
-            risk = calculate_risk(df)
-
-            if confidence > 0.5:
-
-                send_message(f"""
-🤖 AUTO LSTM TRADE
-
-Price: {price}
-Signal: {signal}
-Confidence: {round(confidence,2)}%
-Risk Level: {risk}%
-""")
-
-        except Exception as e:
-            print(e)
-
-        time.sleep(900)
-
-# ==============================
-# WEBHOOK (MANUAL CHECK)
-# ==============================
-
-@app.route("/webhook", methods=["POST"])
-def webhook():
-
-    data = request.json
-
-    if "message" in data:
-
-        text = data["message"].get("text")
-
-        if text == "1":
-
-            price = exchange.fetch_ticker(SYMBOL)["last"]
-            signal, confidence = lstm_signal()
-
-            send_message(f"""
-📊 MANUAL CHECK
-
-Price: {price}
-Signal: {signal}
-Confidence: {round(confidence,2)}%
-""")
+        if message == "1":
+            generate_signal()
 
     return "ok"
 
-# ==============================
-# START BOT
-# ==============================
-
+# ====== START ======
 if __name__ == "__main__":
-
-    # Train if model does not exist
-    if not os.path.exists(MODEL_PATH):
-        train_model()
-
-    threading.Thread(target=auto_loop).start()
-
-    app.run(host="0.0.0.0", port=10000)
+    threading.Thread(target=auto_trade).start()
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
