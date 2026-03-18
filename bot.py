@@ -17,7 +17,7 @@ CHAT_ID = os.getenv("6094849602")
 # =========================
 # EXCHANGE
 # =========================
-exchange = ccxt.binance()
+exchange = ccxt.bybit()
 
 # =========================
 # FLASK APP
