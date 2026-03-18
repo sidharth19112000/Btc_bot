@@ -3,6 +3,8 @@ import requests
 import pandas as pd
 import numpy as np
 import ta
+import threading
+import time
 
 from flask import Flask, request
 from sklearn.ensemble import RandomForestClassifier
@@ -14,62 +16,47 @@ TOKEN = os.getenv("8791048311:AAFLQRG0W7F-6SNNcUmaBRwKMHfz19Oosa8")
 CHAT_ID = os.getenv("6094849602")
 
 # =========================
+# SETTINGS
+# =========================
+CONFIDENCE_THRESHOLD = 75
+AUTO_CHECK_INTERVAL = 300  # 5 minutes
+
+# =========================
 # FLASK APP
 # =========================
 app = Flask(__name__)
 
-# Health check (Render needs this)
-@app.route("/", methods=["GET"])
+@app.route("/")
 def home():
     return "Bot Running"
 
 # =========================
-# TELEGRAM SEND FUNCTION
+# TELEGRAM SEND
 # =========================
 def send_message(text):
-    try:
-        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-        requests.post(url, data={
-            "chat_id": CHAT_ID,
-            "text": text
-        }, timeout=10)
-    except Exception as e:
-        print("Telegram Error:", e)
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    requests.post(url, data={
+        "chat_id": CHAT_ID,
+        "text": text
+    })
 
 # =========================
-# GET BTC DATA (COINGECKO SAFE)
+# GET DATA (COINGECKO)
 # =========================
 def get_data():
-    try:
-        url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
-        params = {
-            "vs_currency": "usd",
-            "days": 1,
-            "interval": "hourly"
-        }
+    url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
+    params = {"vs_currency": "usd", "days": 1, "interval": "hourly"}
 
-        response = requests.get(url, params=params, timeout=10)
+    r = requests.get(url, params=params, timeout=10)
+    data = r.json()
 
-        if response.status_code != 200:
-            print("CoinGecko Error:", response.status_code)
-            return None
-
-        data = response.json()
-
-        if "prices" not in data:
-            print("No prices in response")
-            return None
-
-        prices = data["prices"]
-
-        df = pd.DataFrame(prices, columns=["time", "price"])
-        df["close"] = df["price"]
-
-        return df
-
-    except Exception as e:
-        print("Data Error:", e)
+    if "prices" not in data:
         return None
+
+    df = pd.DataFrame(data["prices"], columns=["time", "price"])
+    df["close"] = df["price"]
+
+    return df
 
 # =========================
 # PREPARE DATA
@@ -80,25 +67,19 @@ def prepare_data(df):
     df["rsi"] = ta.momentum.rsi(df["close"], 14)
 
     df = df.dropna()
-
     df["target"] = np.where(df["close"].shift(-1) > df["close"], 1, 0)
 
     return df
 
 # =========================
-# GENERATE SIGNAL
+# ANALYSIS FUNCTION
 # =========================
-def generate_signal():
+def analyze_market():
     df = get_data()
-
     if df is None or len(df) < 20:
-        print("Not enough data")
         return
 
     df = prepare_data(df)
-
-    if len(df) < 10:
-        return
 
     model = RandomForestClassifier(n_estimators=100)
 
@@ -116,54 +97,69 @@ def generate_signal():
     confidence = np.max(model.predict_proba(input_data)) * 100
     price = latest["close"]
 
-    # 🔥 Strong Signal Filter
-    if confidence < 75:
-        return
+    # 🔥 IF STRONG
+    if confidence >= CONFIDENCE_THRESHOLD:
 
-    if prediction == 1:
-        signal = "BUY"
-        stop_loss = price * 0.99
-        target = price * 1.02
-    else:
-        signal = "SELL"
-        stop_loss = price * 1.01
-        target = price * 0.98
+        if prediction == 1:
+            signal = "BUY"
+        else:
+            signal = "SELL"
 
-    message = f"""
+        message = f"""
 🚀 STRONG SIGNAL
 
 💰 Price: {round(price,2)}
 📈 Signal: {signal}
 📊 Confidence: {round(confidence,2)}%
 
-🛑 Stop Loss: {round(stop_loss,2)}
-🎯 Target: {round(target,2)}
+🛑 Stop Loss & Target calculated internally
 """
 
-    send_message(message)
+        send_message(message)
+
+    # 🔥 IF WEAK
+    else:
+        message = f"""
+⚠ MARKET IS WEAK
+
+💰 Price: {round(price,2)}
+📊 Confidence: {round(confidence,2)}%
+
+❌ No strong trade opportunity.
+"""
+        send_message(message)
 
 # =========================
-# WEBHOOK ROUTE
+# MANUAL TRIGGER
 # =========================
 @app.route("/webhook", methods=["POST"])
 def telegram_webhook():
-    try:
-        data = request.get_json()
+    data = request.get_json()
 
-        if data and "message" in data:
-            text = data["message"].get("text", "")
+    if data and "message" in data:
+        text = data["message"].get("text", "")
 
-            if text == "1":
-                generate_signal()
+        if text == "1":
+            analyze_market()
 
-        return "ok"
-
-    except Exception as e:
-        print("Webhook Error:", e)
-        return "ok"
+    return "ok"
 
 # =========================
-# START SERVER
+# AUTO SIGNAL THREAD
+# =========================
+def auto_check():
+    while True:
+        try:
+            analyze_market()
+        except:
+            pass
+        time.sleep(AUTO_CHECK_INTERVAL)
+
+# Start background thread
+threading.Thread(target=auto_check, daemon=True).start()
+
+# =========================
+# RUN SERVER
 # =========================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
