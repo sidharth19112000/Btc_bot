@@ -1,141 +1,203 @@
+import os
 import ccxt
 import pandas as pd
-import ta
+import numpy as np
+import tensorflow as tf
 import requests
+import threading
+import time
 from flask import Flask, request
+from sklearn.preprocessing import MinMaxScaler
 
 # ==============================
-# TELEGRAM
+# TELEGRAM SETTINGS (Render ENV)
 # ==============================
-TOKEN = "8791048311:AAFLQRG0W7F-6SNNcUmaBRwKMHfz19Oosa8"
-CHAT_ID = "6094849602"
 
-def send_message(msg):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
+TOKEN = os.environ.get("8791048311:AAFLQRG0W7F-6SNNcUmaBRwKMHfz19Oosa8")
+CHAT_ID = os.environ.get("6094849602")
 
-# ==============================
-# EXCHANGE
-# ==============================
-exchange = ccxt.okx()
-symbol = 'BTC/USDT'
+SYMBOL = "BTC/USDT"
+TIMEFRAME = "15m"
 
-# ==============================
-# GET DATA FUNCTION
-# ==============================
-def get_data(timeframe):
-    ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=100)
-    df = pd.DataFrame(ohlcv, columns=['time','open','high','low','close','volume'])
-
-    df['ma5'] = df['close'].rolling(5).mean()
-    df['ma10'] = df['close'].rolling(10).mean()
-    df['ma30'] = df['close'].rolling(30).mean()
-    df['rsi'] = ta.momentum.RSIIndicator(df['close']).rsi()
-
-    return df
-
-# ==============================
-# 15 MIN TREND
-# ==============================
-def trend_15m():
-    df = get_data('15m')
-    last = df.iloc[-1]
-
-    if last['ma5'] > last['ma10'] > last['ma30']:
-        return "BUY"
-    elif last['ma5'] < last['ma10'] < last['ma30']:
-        return "SELL"
-    else:
-        return "SIDEWAYS"
-
-# ==============================
-# 1 MIN ENTRY
-# ==============================
-def entry_1m():
-    df = get_data('1m')
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-
-    price = round(last['close'], 2)
-
-    buy = prev['ma5'] < prev['ma10'] and last['ma5'] > last['ma10'] and last['rsi'] > 50
-    sell = prev['ma5'] > prev['ma10'] and last['ma5'] < last['ma10'] and last['rsi'] < 50
-
-    if buy:
-        return "BUY", price
-    elif sell:
-        return "SELL", price
-    else:
-        return "WAIT", price
-
-# ==============================
-# FINAL ANALYSIS
-# ==============================
-def analyze():
-    trend = trend_15m()
-    entry, price = entry_1m()
-
-    # Decision logic
-    if trend == "BUY" and entry == "BUY":
-        decision = "STRONG BUY"
-        confidence = 80
-        sl = round(price * 0.99, 2)
-        tp = round(price * 1.02, 2)
-
-    elif trend == "SELL" and entry == "SELL":
-        decision = "STRONG SELL"
-        confidence = 80
-        sl = round(price * 1.01, 2)
-        tp = round(price * 0.98, 2)
-
-    else:
-        decision = "WAIT"
-        confidence = 40
-        sl = "-"
-        tp = "-"
-
-    return trend, entry, decision, confidence, price, sl, tp
-
-# ==============================
-# FLASK WEBHOOK
-# ==============================
 app = Flask(__name__)
 
-@app.route('/', methods=['POST'])
+exchange = ccxt.binance()
+
+# ==============================
+# CREATE OR LOAD LSTM MODEL
+# ==============================
+
+MODEL_PATH = "lstm_model.h5"
+
+def create_model():
+
+    model = tf.keras.Sequential([
+        tf.keras.layers.LSTM(64, input_shape=(50,1)),
+        tf.keras.layers.Dense(1)
+    ])
+
+    model.compile(optimizer="adam", loss="mse")
+    return model
+
+if os.path.exists(MODEL_PATH):
+    model = tf.keras.models.load_model(MODEL_PATH)
+else:
+    model = create_model()
+
+# ==============================
+# SEND TELEGRAM MESSAGE
+# ==============================
+
+def send_message(text):
+
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+
+    requests.post(url, data={
+        "chat_id": CHAT_ID,
+        "text": text
+    })
+
+# ==============================
+# TRAIN LSTM AUTOMATICALLY
+# ==============================
+
+def train_model():
+
+    data = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=1000)
+    df = pd.DataFrame(data, columns=["t","o","h","l","c","v"])
+
+    prices = df["c"].values.reshape(-1,1)
+
+    scaler = MinMaxScaler()
+    scaled = scaler.fit_transform(prices)
+
+    X, y = [], []
+
+    for i in range(50, len(scaled)):
+        X.append(scaled[i-50:i])
+        y.append(scaled[i])
+
+    X, y = np.array(X), np.array(y)
+
+    model.fit(X, y, epochs=5, verbose=0)
+
+    model.save(MODEL_PATH)
+
+# ==============================
+# LSTM SIGNAL
+# ==============================
+
+def lstm_signal():
+
+    data = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=100)
+    df = pd.DataFrame(data, columns=["t","o","h","l","c","v"])
+
+    prices = df["c"].values.reshape(-1,1)
+
+    scaler = MinMaxScaler()
+    scaled = scaler.fit_transform(prices)
+
+    X = np.array(scaled[-50:]).reshape(1,50,1)
+
+    prediction = model.predict(X, verbose=0)[0][0]
+    current = scaled[-1][0]
+
+    confidence = abs(prediction - current) * 100
+
+    if prediction > current:
+        return "BUY", confidence
+    else:
+        return "SELL", confidence
+
+# ==============================
+# RISK PERCENTAGE
+# ==============================
+
+def calculate_risk(df):
+
+    df["atr"] = df["c"].rolling(14).std()
+
+    volatility = df["atr"].iloc[-1] / df["c"].iloc[-1]
+
+    if volatility < 0.005:
+        return 80
+    elif volatility < 0.01:
+        return 60
+    else:
+        return 40
+
+# ==============================
+# AUTO SIGNAL LOOP
+# ==============================
+
+def auto_loop():
+
+    while True:
+
+        try:
+
+            signal, confidence = lstm_signal()
+            price = exchange.fetch_ticker(SYMBOL)["last"]
+
+            data = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=50)
+            df = pd.DataFrame(data, columns=["t","o","h","l","c","v"])
+
+            risk = calculate_risk(df)
+
+            if confidence > 0.5:
+
+                send_message(f"""
+🤖 AUTO LSTM TRADE
+
+Price: {price}
+Signal: {signal}
+Confidence: {round(confidence,2)}%
+Risk Level: {risk}%
+""")
+
+        except Exception as e:
+            print(e)
+
+        time.sleep(900)
+
+# ==============================
+# WEBHOOK (MANUAL CHECK)
+# ==============================
+
+@app.route("/webhook", methods=["POST"])
 def webhook():
+
     data = request.json
 
-    try:
-        text = data['message']['text']
+    if "message" in data:
+
+        text = data["message"].get("text")
 
         if text == "1":
-            trend, entry, decision, conf, price, sl, tp = analyze()
 
-            msg = f"""
-📊 BTC/USDT MULTI-TF ANALYSIS
+            price = exchange.fetch_ticker(SYMBOL)["last"]
+            signal, confidence = lstm_signal()
 
-💰 Price: {price}
+            send_message(f"""
+📊 MANUAL CHECK
 
-📈 15m Trend: {trend}
-⚡ 1m Entry: {entry}
-
-🎯 Final: {decision}
-📊 Confidence: {conf}%
-
-🛑 Stop Loss: {sl}
-🎯 Target: {tp}
-
-⚠️ {'Take Trade' if decision != 'WAIT' else 'Avoid Trade'}
-"""
-            send_message(msg)
-
-    except Exception as e:
-        print("Error:", e)
+Price: {price}
+Signal: {signal}
+Confidence: {round(confidence,2)}%
+""")
 
     return "ok"
 
 # ==============================
-# START
+# START BOT
 # ==============================
+
 if __name__ == "__main__":
+
+    # Train if model does not exist
+    if not os.path.exists(MODEL_PATH):
+        train_model()
+
+    threading.Thread(target=auto_loop).start()
+
     app.run(host="0.0.0.0", port=10000)
