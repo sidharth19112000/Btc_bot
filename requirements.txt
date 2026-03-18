@@ -1,5 +1,8 @@
 ccxt
 pandas
-ta
-requests
+numpy
+tensorflow
+scikit-learn
 flask
+requests
+ta
