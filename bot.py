@@ -1,86 +1,106 @@
 import ccxt
 import pandas as pd
 import ta
-import requests
 import time
+import requests
 from flask import Flask
 import threading
 
-# ================= CONFIG =================
-symbol = 'BTC/USDT'
-timeframe = '15m'
+# ==============================
+# 🔑 YOUR TELEGRAM DETAILS
+# ==============================
+TOKEN = "8791048311:AAFLQRG0W7F-6SNNcUmaBRwKMHfz19Oosa8"
+CHAT_ID = "6094849602"
 
-TELEGRAM_TOKEN = '8791048311:AAFLQRG0W7F-6SNNcUmaBRwKMHfz19Oosa8'
-CHAT_ID = '6094849602'
-
-exchange = ccxt.coinbase()
-
-# ================= TELEGRAM =================
+# ==============================
+# 📡 TELEGRAM FUNCTION
+# ==============================
 def send_telegram(msg):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    requests.get(url, params={"chat_id": CHAT_ID, "text": msg})
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    data = {"chat_id": CHAT_ID, "text": msg}
+    requests.post(url, data=data)
 
-# ================= DATA =================
+# ==============================
+# 📊 GET MARKET DATA (OKX)
+# ==============================
+exchange = ccxt.okx()
+
 def get_data():
-    ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=100)
+    ohlcv = exchange.fetch_ohlcv('BTC/USDT', timeframe='15m', limit=100)
     df = pd.DataFrame(ohlcv, columns=['time','open','high','low','close','volume'])
-    return df
 
-# ================= INDICATORS =================
-def apply_indicators(df):
+    # Indicators
     df['ma5'] = df['close'].rolling(5).mean()
     df['ma10'] = df['close'].rolling(10).mean()
     df['ma30'] = df['close'].rolling(30).mean()
-    df['rsi'] = ta.momentum.rsi(df['close'], window=14)
-    df['volume_avg'] = df['volume'].rolling(10).mean()
+    df['rsi'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
+    df['vol_avg'] = df['volume'].rolling(20).mean()
+
     return df
 
-# ================= BUY SIGNAL =================
-def check_buy(df):
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
+# ==============================
+# 🤖 TRADING LOGIC
+# ==============================
+def run_bot():
+    print("Bot started...")
 
-    trend = last['ma5'] > last['ma10'] > last['ma30']
-    crossover = prev['ma5'] <= prev['ma10'] and last['ma5'] > last['ma10']
-    rsi_ok = last['rsi'] > 50
-    volume_ok = last['volume'] > last['volume_avg']
+    # ✅ TEST MESSAGE
+    send_telegram("✅ Bot is live and working!")
 
-    return trend and crossover and rsi_ok and volume_ok
+    last_signal = ""
 
-# ================= FLASK APP =================
+    while True:
+        try:
+            df = get_data()
+            last = df.iloc[-1]
+
+            price = last['close']
+
+            # BUY CONDITIONS
+            buy_condition = (
+                last['ma5'] > last['ma10'] > last['ma30'] and
+                last['rsi'] > 45 and
+                last['volume'] > last['vol_avg']
+            )
+
+            # SELL CONDITIONS
+            sell_condition = (
+                last['ma5'] < last['ma10'] < last['ma30'] and
+                last['rsi'] < 55 and
+                last['volume'] > last['vol_avg']
+            )
+
+            # SIGNALS
+            if buy_condition and last_signal != "BUY":
+                msg = f"🟢 BUY SIGNAL\nPrice: {price}"
+                print(msg)
+                send_telegram(msg)
+                last_signal = "BUY"
+
+            elif sell_condition and last_signal != "SELL":
+                msg = f"🔴 SELL SIGNAL\nPrice: {price}"
+                print(msg)
+                send_telegram(msg)
+                last_signal = "SELL"
+
+            time.sleep(60)
+
+        except Exception as e:
+            print("Error:", e)
+            time.sleep(10)
+
+# ==============================
+# 🌐 FLASK SERVER (RENDER FIX)
+# ==============================
 app = Flask(__name__)
 
 @app.route('/')
 def home():
     return "🚀 BTC Bot Running Successfully!"
 
-# ================= BOT LOOP =================
-def run_bot():
-    print("Bot started...")
-    last_signal = ""
-
-    while True:
-        try:
-            df = get_data()
-            df = apply_indicators(df)
-
-            if check_buy(df):
-                price = df.iloc[-1]['close']
-
-                # Avoid duplicate signals
-                if last_signal != "BUY":
-                    msg = f"🚀 BUY BTC at {price}"
-                    send_telegram(msg)
-                    print(msg)
-                    last_signal = "BUY"
-
-            time.sleep(60)
-
-        except Exception as e:
-            print("Error:", e)
-            time.sleep(60)
-
-# ================= START =================
-threading.Thread(target=run_bot).start()
-
-app.run(host='0.0.0.0', port=10000)
+# ==============================
+# ▶️ START BOT + SERVER
+# ==============================
+if __name__ == "__main__":
+    threading.Thread(target=run_bot).start()
+    app.run(host="0.0.0.0", port=10000)
