@@ -11,7 +11,7 @@ from sklearn.ensemble import RandomForestClassifier
 # =========================
 # ENV VARIABLES
 # =========================
-TOKEN = os.getenv("8791048311:AAFLQRG0W7F-6SNNcUmaBRwKMHfz190osa8")
+TOKEN = os.getenv("8791048311:AAFLQRG0W7F-6SNNcUmaBRwKMHfz19Oosa8")
 CHAT_ID = os.getenv("6094849602")
 
 # =========================
@@ -24,7 +24,7 @@ exchange = ccxt.binance()
 # =========================
 app = Flask(__name__)
 
-# Root route (for Render health check)
+# Health check route (Render needs this)
 @app.route("/", methods=["GET"])
 def home():
     return "Bot Running"
@@ -40,7 +40,7 @@ def send_message(text):
     })
 
 # =========================
-# GET DATA
+# GET MARKET DATA
 # =========================
 def get_data():
     ohlcv = exchange.fetch_ohlcv("BTC/USDT", "15m", limit=200)
@@ -55,13 +55,14 @@ def prepare_data(df):
     df['sma10'] = ta.trend.sma_indicator(df['close'], 10)
     df['rsi'] = ta.momentum.rsi(df['close'], 14)
     df['macd'] = ta.trend.macd_diff(df['close'])
+
     df = df.dropna()
 
     df['target'] = np.where(df['close'].shift(-1) > df['close'], 1, 0)
     return df
 
 # =========================
-# SIGNAL LOGIC
+# GENERATE SIGNAL
 # =========================
 def generate_signal():
     df = get_data()
@@ -109,9 +110,9 @@ def generate_signal():
     send_message(message)
 
 # =========================
-# WEBHOOK ROUTE (STEP 2 FIX)
+# WEBHOOK ROUTE (STEP 1 FIX)
 # =========================
-@app.route(f"/{TOKEN}", methods=["POST"])
+@app.route("/webhook", methods=["POST"])
 def telegram_webhook():
     data = request.get_json()
 
