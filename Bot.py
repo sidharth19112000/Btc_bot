@@ -7,7 +7,7 @@ import time
 symbol = 'BTC/USDT'
 timeframe = '15m'
 
-TELEGRAM_TOKEN = '8791048311:AAFLQRG0W7F- 6SNNcUmaBRwKMHfz190osa8'
+TELEGRAM_TOKEN = '8791048311:AAFLQRG0W7F-6SNNcUmaBRwKMHfz19Oosa8'
 CHAT_ID = '6094849602'
 
 exchange = ccxt.coinbase()
