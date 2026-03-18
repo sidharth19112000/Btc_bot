@@ -11,7 +11,7 @@ from sklearn.ensemble import RandomForestClassifier
 # =========================
 # ENV VARIABLES
 # =========================
-TOKEN = os.getenv("8791048311:AAFLQRG0W7F-6SNNcUmaBRwKMHfz19Oosa8")
+TOKEN = os.getenv("8791048311:AAFLQRG0W7F- 6SNNcUmaBRwKMHfz190osa8")
 CHAT_ID = os.getenv("6094849602")
 
 # =========================
@@ -20,20 +20,24 @@ CHAT_ID = os.getenv("6094849602")
 exchange = ccxt.binance()
 
 # =========================
-# FLASK
+# FLASK APP
 # =========================
 app = Flask(__name__)
 
-@app.route("/")
+# Root route (for Render health check)
+@app.route("/", methods=["GET"])
 def home():
     return "Bot Running"
 
 # =========================
-# TELEGRAM SEND
+# TELEGRAM SEND FUNCTION
 # =========================
 def send_message(text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    requests.post(url, data={"chat_id": CHAT_ID, "text": text})
+    requests.post(url, data={
+        "chat_id": CHAT_ID,
+        "text": text
+    })
 
 # =========================
 # GET DATA
@@ -57,15 +61,15 @@ def prepare_data(df):
     return df
 
 # =========================
-# GENERATE SIGNAL
+# SIGNAL LOGIC
 # =========================
 def generate_signal():
     df = get_data()
     df = prepare_data(df)
 
     model = RandomForestClassifier(n_estimators=100)
-    features = ['sma5','sma10','rsi','macd']
 
+    features = ['sma5','sma10','rsi','macd']
     X = df[features]
     y = df['target']
 
@@ -78,9 +82,9 @@ def generate_signal():
     confidence = np.max(model.predict_proba(input_data)) * 100
     price = latest['close']
 
-    # 🔥 STRONG SIGNAL FILTER
+    # Strong signal filter
     if confidence < 75:
-        return  # Do NOT send anything
+        return
 
     if prediction == 1:
         signal = "BUY"
@@ -92,7 +96,7 @@ def generate_signal():
         target = price * 0.98
 
     message = f"""
-🚀 STRONG SIGNAL DETECTED
+🚀 STRONG SIGNAL
 
 💰 Price: {price}
 📈 Signal: {signal}
@@ -105,13 +109,13 @@ def generate_signal():
     send_message(message)
 
 # =========================
-# TELEGRAM WEBHOOK
+# WEBHOOK ROUTE (STEP 2 FIX)
 # =========================
 @app.route(f"/{TOKEN}", methods=["POST"])
-def webhook():
+def telegram_webhook():
     data = request.get_json()
 
-    if "message" in data:
+    if data and "message" in data:
         text = data["message"].get("text", "")
 
         if text == "1":
@@ -120,7 +124,8 @@ def webhook():
     return "ok"
 
 # =========================
-# START
+# START SERVER
 # =========================
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
